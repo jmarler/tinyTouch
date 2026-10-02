@@ -94,6 +94,35 @@ class ProtocolSixFirmwareTests(unittest.TestCase):
         self.assertIn('"piv_crypto_ok"', piv)
         self.assertIn('"piv_crypto_rejected"', piv)
 
+    def test_fallback_pin_grants_one_login_and_never_replaces_fingerprint_pin(self) -> None:
+        piv = self.source("piv.c")
+        console = self.source("config_console.c")
+        cmake = self.source("CMakeLists.txt")
+        self.assertIn('"piv_pin.c"', cmake)
+        verify = piv[piv.index("static bool handle_verify("):piv.index("static bool handle_general_authenticate(")]
+        # The typed fingerprint PIN is handled first and never reaches the
+        # fallback check or spends one of its attempts.
+        self.assertLess(
+            verify.index("memcmp(data, expected_pin, sizeof(expected_pin)) == 0"),
+            verify.index("piv_pin_verify(data)"),
+        )
+        match = verify[verify.index("case PIV_PIN_MATCH:"):verify.index("case PIV_PIN_NO_MATCH:")]
+        self.assertIn("grant_user_presence_locked(USER_PRESENCE_WINDOW_TICKS, 2, false)", match)
+        self.assertEqual(verify.count("grant_user_presence_locked"), 1)
+        self.assertIn("0x63c0 | piv_pin_tries_left()", verify)
+        self.assertIn("0x6983", verify)
+        for name in ("piv_note_user_presence", "piv_note_configuration_presence"):
+            body = piv[piv.index(f"void {name}(void) {{"):]
+            body = body[:body.index("\n}\n")]
+            self.assertIn("piv_pin_reset_tries();", body)
+        self.assertIn("piv_pin_load();", piv[piv.index("void piv_init(void) {"):])
+        command = console[console.index("static void piv_pin_command("):console.index("static void usb_reconnect_task(")]
+        self.assertTrue(command.split("{", 1)[1].lstrip().startswith("if (!require_authorized()) return;"))
+        self.assertIn("wipe(pin, sizeof(pin));", command)
+        self.assertIn("wipe(hex, hex_length);", command)
+        self.assertIn('strncmp(command, "PIV PIN ", 8) == 0', console)
+        self.assertIn("piv_pin=%s", console)
+
     def test_fingerprint_auth_requires_presence(self) -> None:
         source = self.source("touch_pin_hid.c")
         self.assertIn("if (!present || !runtime.presence_armed)", source)

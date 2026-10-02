@@ -15,6 +15,7 @@
 #include "mbedtls/oid.h"
 #include "mbedtls/x509_crt.h"
 #include "nvs.h"
+#include "piv_pin.h"
 #include "touch_pin_hid.h"
 
 static const char *TAG = "piv";
@@ -94,6 +95,17 @@ static const TickType_t PIN_VERIFIED_WINDOW_TICKS = pdMS_TO_TICKS(60000);
 static const TickType_t USER_PRESENCE_WINDOW_TICKS = pdMS_TO_TICKS(10000);
 static const TickType_t CONFIGURATION_PRESENCE_WINDOW_TICKS = pdMS_TO_TICKS(30000);
 static const uint8_t CONFIGURATION_PIV_OPERATION_LIMIT = 8;
+
+// Callers hold piv_mutex. A fingerprint match and a correct fallback PIN both
+// grant this window, so the two login paths stay equally narrow.
+static void grant_user_presence_locked(TickType_t window, uint8_t operations,
+                                       bool allow_repeated_slots) {
+  user_presence_until = xTaskGetTickCount() + window;
+  user_presence_slots_used = 0;
+  user_presence_operations_left = operations;
+  user_presence_allows_repeated_slots = allow_repeated_slots;
+  user_presence_window_ticks = window;
+}
 
 static size_t encode_len(uint8_t *out, size_t len);
 static int piv_rng(void *ctx, unsigned char *out, size_t len);
@@ -567,13 +579,38 @@ static bool handle_verify(const uint8_t *apdu, size_t apdu_len,
     '1', '1', '1', '1', '1', '1', 0xff, 0xff,
   };
   if (!read_lc_data(apdu, apdu_len, &data, &data_len) ||
-      data_len != sizeof(expected_pin) ||
-      memcmp(data, expected_pin, sizeof(expected_pin)) != 0) {
+      data_len != sizeof(expected_pin)) {
     pin_verified_until = 0;
     return append_sw(response, response_len, response_cap, 0x6a80);
   }
-  pin_verified_until = xTaskGetTickCount() + PIN_VERIFIED_WINDOW_TICKS;
-  return append_sw(response, response_len, response_cap, 0x9000);
+  if (memcmp(data, expected_pin, sizeof(expected_pin)) == 0) {
+    // The device types this PIN itself after a fingerprint match. It proves
+    // nothing alone; signing still needs that match's user-presence window.
+    pin_verified_until = xTaskGetTickCount() + PIN_VERIFIED_WINDOW_TICKS;
+    return append_sw(response, response_len, response_cap, 0x9000);
+  }
+  // Anything else can only be the optional fallback PIN, which stands in for
+  // the fingerprint when nobody can touch the sensor (remote sessions).
+  pin_verified_until = 0;
+  switch (piv_pin_verify(data)) {
+    case PIV_PIN_MATCH:
+      pin_verified_until = xTaskGetTickCount() + PIN_VERIFIED_WINDOW_TICKS;
+      grant_user_presence_locked(USER_PRESENCE_WINDOW_TICKS, 2, false);
+      touch_pin_hid_log_event("piv_pin_fallback_ok", 0);
+      return append_sw(response, response_len, response_cap, 0x9000);
+    case PIV_PIN_NO_MATCH:
+      touch_pin_hid_log_event("piv_pin_fallback_rejected", piv_pin_tries_left());
+      return append_sw(response, response_len, response_cap,
+                       (uint16_t)(0x63c0 | piv_pin_tries_left()));
+    case PIV_PIN_LOCKED:
+      touch_pin_hid_log_event("piv_pin_fallback_blocked", 0);
+      return append_sw(response, response_len, response_cap, 0x6983);
+    case PIV_PIN_STORAGE_ERROR:
+      return append_sw(response, response_len, response_cap, 0x6581);
+    case PIV_PIN_NOT_SET:
+    default:
+      return append_sw(response, response_len, response_cap, 0x6a80);
+  }
 }
 
 static bool handle_general_authenticate(const uint8_t *apdu, size_t apdu_len,
@@ -674,6 +711,7 @@ static bool handle_general_authenticate(const uint8_t *apdu, size_t apdu_len,
 void piv_init(void) {
   if (!piv_mutex) piv_mutex = xSemaphoreCreateMutex();
   configASSERT(piv_mutex);
+  piv_pin_load();
   uint8_t mac[6];
   if (esp_read_mac(mac, ESP_MAC_WIFI_STA) == ESP_OK) {
     // Give an unconfigured board a stable temporary token identifier. Once an
@@ -778,23 +816,40 @@ void piv_reset_transport_state(void) {
 
 void piv_note_user_presence(void) {
   if (piv_mutex) xSemaphoreTake(piv_mutex, portMAX_DELAY);
-  user_presence_until = xTaskGetTickCount() + USER_PRESENCE_WINDOW_TICKS;
-  user_presence_slots_used = 0;
-  user_presence_operations_left = 2;
-  user_presence_allows_repeated_slots = false;
-  user_presence_window_ticks = USER_PRESENCE_WINDOW_TICKS;
+  grant_user_presence_locked(USER_PRESENCE_WINDOW_TICKS, 2, false);
+  // A matched fingerprint proves the owner is present, so it restores the
+  // fallback PIN's attempts the same way a correct PIN would.
+  piv_pin_reset_tries();
   if (piv_mutex) xSemaphoreGive(piv_mutex);
 }
 
 void piv_note_configuration_presence(void) {
   if (piv_mutex) xSemaphoreTake(piv_mutex, portMAX_DELAY);
-  user_presence_until =
-      xTaskGetTickCount() + CONFIGURATION_PRESENCE_WINDOW_TICKS;
-  user_presence_slots_used = 0;
-  user_presence_operations_left = CONFIGURATION_PIV_OPERATION_LIMIT;
-  user_presence_allows_repeated_slots = true;
-  user_presence_window_ticks = CONFIGURATION_PRESENCE_WINDOW_TICKS;
+  grant_user_presence_locked(CONFIGURATION_PRESENCE_WINDOW_TICKS,
+                             CONFIGURATION_PIV_OPERATION_LIMIT, true);
+  piv_pin_reset_tries();
   if (piv_mutex) xSemaphoreGive(piv_mutex);
+}
+
+bool piv_set_fallback_pin(const uint8_t *pin, size_t pin_len) {
+  if (piv_mutex) xSemaphoreTake(piv_mutex, portMAX_DELAY);
+  bool ok = piv_pin_set(pin, pin_len);
+  if (piv_mutex) xSemaphoreGive(piv_mutex);
+  return ok;
+}
+
+bool piv_clear_fallback_pin(void) {
+  if (piv_mutex) xSemaphoreTake(piv_mutex, portMAX_DELAY);
+  bool ok = piv_pin_clear();
+  if (piv_mutex) xSemaphoreGive(piv_mutex);
+  return ok;
+}
+
+const char *piv_fallback_pin_state_name(void) {
+  if (piv_mutex) xSemaphoreTake(piv_mutex, portMAX_DELAY);
+  const char *name = piv_pin_state_name();
+  if (piv_mutex) xSemaphoreGive(piv_mutex);
+  return name;
 }
 
 static bool piv_handle_apdu_locked(const uint8_t *apdu, size_t apdu_len,

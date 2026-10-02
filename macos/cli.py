@@ -1540,6 +1540,51 @@ def command_keys(args: argparse.Namespace) -> None:
     say("The PIV identity is ready.")
 
 
+def fallback_pin_problem(pin: str) -> str | None:
+    """Mirror the firmware's fallback PIN rules so mistakes cost no fingerprint."""
+    if not 6 <= len(pin) <= 8:
+        return "The fallback PIN must be 6 to 8 characters."
+    if any(not "!" <= character <= "~" for character in pin):
+        return "Use letters, digits, or ASCII symbols; spaces are not allowed."
+    if pin == "111111":
+        return "111111 is the PIN tinyTouch types after a fingerprint, so it cannot be the fallback."
+    return None
+
+
+def command_pin(args: argparse.Namespace) -> None:
+    port = choose_port(args.port)
+    with foreground_session(port):
+        device = status(port)
+        protocol6(device)
+        if "piv_pin" not in device:
+            raise ToolError(
+                "This firmware does not support a fallback PIN. Run 'tinytouch update', "
+                "then unplug and reconnect tinyTouch before trying again."
+            )
+        if args.action == "clear":
+            unlock(port, reason="clear the fallback PIN")
+            serial_command(port, "PIV PIN CLEAR", timeout=5)
+            fresh_status(port, {"piv_pin": "unset"})
+            say("The fallback PIN is cleared. PIV login now needs a fingerprint.")
+            return
+        say("Choose a 6 to 8 character PIN for logging in when nobody can touch the sensor,")
+        say("such as over Screen Sharing or RustDesk. It replaces the fingerprint, so do not")
+        say("reuse your Mac password. (Your typing is hidden.)")
+        first = getpass.getpass("Fallback PIN: ")
+        problem = fallback_pin_problem(first)
+        if problem:
+            raise ToolError(problem)
+        if getpass.getpass("Fallback PIN again: ") != first:
+            raise ToolError("The PINs did not match. Nothing was changed.")
+        unlock(port, reason="set the fallback PIN")
+        serial_command(port, f"PIV PIN SET {first.encode('ascii').hex()}", timeout=5)
+        fresh_status(port, {"piv_pin": "set"})
+        say("The fallback PIN is set. Enter it when macOS asks for the smart-card PIN.")
+        say("Five wrong entries disable it until the next fingerprint touch.")
+        if device.get("mode") != "piv":
+            say("tinyTouch is in HID mode. The PIN applies after 'tinytouch mode piv'.")
+
+
 def piv_identities() -> tuple[list[str], list[str]]:
     """Return the paired and unpaired smart-card identity hashes."""
     result = subprocess.run(
@@ -1746,6 +1791,10 @@ def parser() -> argparse.ArgumentParser:
     pair = sub.add_parser("pair")
     pair.add_argument("--port")
     pair.set_defaults(func=command_pair)
+    pin = sub.add_parser("pin", help="set or clear a PIN that can replace the fingerprint for PIV login")
+    pin.add_argument("action", choices=("set", "clear"))
+    pin.add_argument("--port")
+    pin.set_defaults(func=command_pin)
     hid_smoke = sub.add_parser("hid-smoke")
     hid_smoke.set_defaults(func=command_hid_smoke)
     enroll_demo = sub.add_parser("enroll-demo", help=argparse.SUPPRESS)

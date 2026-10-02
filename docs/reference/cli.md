@@ -72,6 +72,7 @@ Prints JSON containing:
 | `build` | First 12 characters of the source commit, or `development` |
 | `mode` | `piv` or `hid` |
 | `piv` | `ready` or `unconfigured` |
+| `piv_pin` | Fallback PIN: `unset`, `set`, or `blocked` after five wrong entries (firmware 0.1.32+) |
 | `led` | Saved sensor LED setting: `on`/`off` (0.1.29+) or `only-auth` (0.1.30+) |
 | `led_only_auth` | `1` when authentication-only lighting is supported (firmware 0.1.30+) |
 | `sensor` | `ready` or `offline` after a live UART probe |
@@ -159,6 +160,23 @@ tinytouch pair [--port PATH]
 ```
 
 Pairs the PIV identity with the current macOS user. Requires administrator and fingerprint approval.
+
+## `pin`
+
+```text
+tinytouch pin {set,clear} [--port PATH]
+```
+
+Sets or clears a fallback PIN for PIV login when nobody can touch the sensor,
+such as over Screen Sharing or RustDesk (CLI and firmware 0.1.32+). Enter it
+where macOS asks for the smart-card PIN. Each change requires fingerprint approval.
+
+The PIN is 6 to 8 letters, digits, or ASCII symbols, and cannot be `111111`.
+It approves the same single login a fingerprint does. Five wrong entries disable
+it until the next fingerprint touch.
+
+The fallback PIN replaces the fingerprint, so anyone who knows it can log in
+while tinyTouch is connected. Do not reuse your Mac password.
 
 ## `update`
 

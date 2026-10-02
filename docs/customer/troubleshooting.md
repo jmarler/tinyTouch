@@ -55,6 +55,21 @@ sc_auth identities
 
 For an unpaired identity, run `tinytouch pair`. If no identity appears, run `tinytouch keys`, reconnect, and retry. For a PIN prompt, enter `111111`.
 
+## Can't log in remotely
+
+While tinyTouch is connected in PIV mode, macOS asks for the smart-card PIN
+instead of your password. Over Screen Sharing or RustDesk, nobody can touch the
+sensor, and `111111` alone is refused.
+
+Before you need remote access, set a fallback PIN at the Mac:
+
+```sh
+tinytouch pin set
+```
+
+Then enter that PIN at the remote login prompt. If `tinytouch status` reports
+`piv_pin=blocked`, touch the sensor once in person to restore it.
+
 ## HID doesn't type
 
 Check that the helper is loaded and inspect both logs:

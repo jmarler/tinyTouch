@@ -151,10 +151,10 @@ static void status(void) {
   // unavailable fingerprint count.
   bool sensor_is_ready = fingerprint_is_ready();
   snprintf(line, sizeof(line),
-           "OK STATUS protocol=6 firmware=%s build=%s mode=%s piv=%s sensor=%s fingerprints=%d "
-           "hosts=%u ota=%s led=%s led_only_auth=1 finger_groups=1",
+           "OK STATUS protocol=6 firmware=%s build=%s mode=%s piv=%s piv_pin=%s sensor=%s "
+           "fingerprints=%d hosts=%u ota=%s led=%s led_only_auth=1 finger_groups=1",
            TINYTOUCH_FIRMWARE_VERSION, TINYTOUCH_BUILD_ID, device_config_mode_name(),
-           piv_uses_provisioned_keys() ? "ready" : "unconfigured",
+           piv_uses_provisioned_keys() ? "ready" : "unconfigured", piv_fallback_pin_state_name(),
            sensor_is_ready ? "ready" : "offline", count,
            (unsigned)device_config_hid_host_count(), firmware_update_staged() ? "staged" :
            (firmware_update_active() ? "writing" : "idle"), device_config_led_mode_name());
@@ -337,6 +337,25 @@ static void piv_create(void) {
   reply("EVENT PIV_CREATE");
 }
 
+static void piv_pin_command(char *arguments) {
+  if (!require_authorized()) return;
+  bool ok = false;
+  if (strncmp(arguments, "SET ", 4) == 0) {
+    char *hex = arguments + 4;
+    size_t hex_length = strlen(hex);
+    size_t length = hex_length / 2;
+    uint8_t pin[8] = {0};
+    ok = length <= sizeof(pin) && decode_hex(hex, pin, length) &&
+         piv_set_fallback_pin(pin, length);
+    wipe(pin, sizeof(pin));
+    // The PIN is a secret; do not leave it in the command buffer.
+    wipe(hex, hex_length);
+  } else if (strcmp(arguments, "CLEAR") == 0) {
+    ok = piv_clear_fallback_pin();
+  }
+  reply(ok ? "OK PIV PIN" : "ERR PIV PIN");
+}
+
 static void usb_reconnect_task(void *argument) {
   (void)argument;
   vTaskDelay(pdMS_TO_TICKS(100));
@@ -408,6 +427,7 @@ static void handle_command(void) {
   else if (strcmp(command, "HOST LIST") == 0) host_list();
   else if (strncmp(command, "FINGER ", 7) == 0) fingerprint_command(command + 7);
   else if (strcmp(command, "PIV CREATE") == 0) piv_create();
+  else if (strncmp(command, "PIV PIN ", 8) == 0) piv_pin_command(command + 8);
   else if (strcmp(command, "RESET FACTORY") == 0) factory_reset();
   else if (strncmp(command, "OTA BEGIN ", 10) == 0) ota_begin(command + 10);
   else if (strncmp(command, "OTA WRITE ", 10) == 0) ota_write(command + 10);

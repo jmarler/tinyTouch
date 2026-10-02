@@ -107,6 +107,12 @@ Removing the last host selects PIV mode.
 
 `piv=ready` means the device has a private key and certificate. Run `sc_auth identities` to check macOS pairing.
 
+`piv_pin` reports the optional fallback PIN set with `tinytouch pin set`. While
+it is `set`, the PIN can approve one PIV login in place of a fingerprint. Each
+wrong entry is recorded before the PIN is checked. After five, the state is
+`blocked` until the next fingerprint touch. The PIN is stored on the device as a
+salted hash. Factory reset and browser recovery erase it.
+
 ## macOS paths
 
 | Path | Purpose |

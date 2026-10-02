@@ -98,6 +98,81 @@ class ProtocolSixTests(unittest.TestCase):
                 args.func(args)
             output.assert_not_called()
 
+    def pin_command(self, action, *, statuses, entries=()):
+        """Run 'tinytouch pin' with a stubbed device; return the mocks that matter."""
+        prompts = mock.Mock(side_effect=list(entries))
+        unlock = mock.Mock(side_effect=lambda *_, **__: self.assertEqual(
+            prompts.call_count, len(entries), "PIN entry must finish before the fingerprint prompt"))
+        with (
+            mock.patch.object(cli, "choose_port", return_value="/dev/cu.TT"),
+            mock.patch.object(cli, "foreground_session"),
+            mock.patch.object(cli, "status", side_effect=statuses),
+            mock.patch.object(cli.getpass, "getpass", prompts),
+            mock.patch.object(cli, "unlock", unlock),
+            mock.patch.object(cli, "serial_command") as command,
+            mock.patch.object(cli, "say") as output,
+        ):
+            self.pin_unlock, self.pin_serial = unlock, command
+            args = cli.parser().parse_args(["pin", action])
+            try:
+                args.func(args)
+            finally:
+                self.pin_output = "\n".join(str(call.args[0]) for call in output.call_args_list if call.args)
+        return unlock, command
+
+    PIN_DEVICE = {"protocol": "6", "firmware": "0.1.32", "mode": "piv", "piv_pin": "unset"}
+
+    def test_pin_set_sends_hex_after_entry_and_verifies_readback(self):
+        unlock, command = self.pin_command(
+            "set", statuses=[self.PIN_DEVICE, {"piv_pin": "set"}], entries=("pin-test", "pin-test"))
+        unlock.assert_called_once()
+        command.assert_called_once_with("/dev/cu.TT", "PIV PIN SET " + b"pin-test".hex(), timeout=5)
+        self.assertIn("fallback PIN is set", self.pin_output)
+        self.assertNotIn("HID mode", self.pin_output)
+
+    def test_pin_set_rejects_invalid_pins_before_fingerprint_or_write(self):
+        self.assertIsNone(cli.fallback_pin_problem("246810"))
+        for pin in ("12345", "123456789", "111111", "12 456", "pïn123", ""):
+            with self.subTest(pin=pin):
+                with self.assertRaises(cli.ToolError):
+                    self.pin_command("set", statuses=[self.PIN_DEVICE], entries=(pin,))
+                self.pin_unlock.assert_not_called()
+                self.pin_serial.assert_not_called()
+
+    def test_pin_set_mismatch_changes_nothing(self):
+        with self.assertRaisesRegex(cli.ToolError, "did not match"):
+            self.pin_command("set", statuses=[self.PIN_DEVICE], entries=("246810", "246811"))
+        self.pin_unlock.assert_not_called()
+        self.pin_serial.assert_not_called()
+
+    def test_pin_on_old_firmware_requires_update_without_prompting(self):
+        old = {"protocol": "6", "firmware": "0.1.31", "mode": "piv"}
+        for action in ("set", "clear"):
+            with self.subTest(action=action):
+                with self.assertRaisesRegex(cli.ToolError, "tinytouch update"):
+                    self.pin_command(action, statuses=[old])
+                self.pin_unlock.assert_not_called()
+                self.pin_serial.assert_not_called()
+
+    def test_pin_clear_verifies_the_fallback_is_gone(self):
+        unlock, command = self.pin_command(
+            "clear", statuses=[{**self.PIN_DEVICE, "piv_pin": "blocked"}, {"piv_pin": "unset"}])
+        unlock.assert_called_once()
+        command.assert_called_once_with("/dev/cu.TT", "PIV PIN CLEAR", timeout=5)
+        self.assertIn("needs a fingerprint", self.pin_output)
+
+    def test_pin_wrong_readback_does_not_report_success(self):
+        with self.assertRaisesRegex(cli.ToolError, "Live verification failed"):
+            self.pin_command(
+                "set", statuses=[self.PIN_DEVICE, {"piv_pin": "unset"}], entries=("246810", "246810"))
+        self.assertNotIn("fallback PIN is set", self.pin_output)
+
+    def test_pin_set_in_hid_mode_explains_when_it_applies(self):
+        self.pin_command(
+            "set", statuses=[{**self.PIN_DEVICE, "mode": "hid"}, {"piv_pin": "set"}],
+            entries=("246810", "246810"))
+        self.assertIn("tinytouch mode piv", self.pin_output)
+
     def test_startup_mark_shows_version_and_command_section(self):
         with (
             mock.patch.object(cli.sys.stdout, "isatty", return_value=True),

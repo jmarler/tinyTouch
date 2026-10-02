@@ -38,6 +38,7 @@ Recovery removes:
 
 - fingerprint templates from the sensor;
 - PIV private keys and certificates;
+- the PIV fallback PIN;
 - HID host pairing keys;
 - mode and timing settings;
 - OTA and configuration state stored in NVS.

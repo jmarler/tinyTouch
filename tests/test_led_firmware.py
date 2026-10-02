@@ -18,12 +18,16 @@ class LedFirmwareTests(unittest.TestCase):
     def test_console_authorization_inventory_and_disconnect(self):
         self.run_firmware_case("console_groups_test.c")
 
+    def test_piv_fallback_pin_attempts_and_storage(self):
+        self.run_firmware_case("piv_pin_test.c")
+
     def run_firmware_case(self, filename):
         with tempfile.TemporaryDirectory() as directory:
             build = Path(directory)
             for name in (
                 "freertos/FreeRTOS.h", "freertos/semphr.h", "freertos/task.h",
-                "driver/uart.h", "driver/gpio.h", "esp_log.h", "nvs.h", "mbedtls/sha256.h",
+                "driver/uart.h", "driver/gpio.h", "esp_log.h", "esp_random.h", "nvs.h",
+                "mbedtls/sha256.h",
             ):
                 header = build / name
                 header.parent.mkdir(parents=True, exist_ok=True)
